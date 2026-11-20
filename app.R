@@ -46,6 +46,13 @@ if (nchar(google_json_env) > 0) {
 
 SHEET_ID <- "https://docs.google.com/spreadsheets/d/YOUR_SPREADSHEET_ID/edit"
 
+# Read schema headers from Row 1 on startup (works even with 0 response rows)
+initial_sheet <- googlesheets4::read_sheet(SHEET_ID)
+schema_cols <- names(initial_sheet)
+
+# Exclude automatic Timestamp column from user-facing form inputs if present
+question_cols <- setdiff(schema_cols, c("Timestamp", "timestamp"))
+
 # 2. Source modules
 source("R/survey_module.R")
 source("R/analytics/01_summary_meta_module.R")
