@@ -63,21 +63,6 @@ survey_active_ui <- function(id) {
   
   card(
     tags$style(HTML("
-      /* Add spacing between inline radio options in Bootstrap 5 (bslib) */
-      .shiny-options-group {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 20px; /* Controls space between each option */
-        margin-top: 8px;
-      }
-      .form-check-inline, .radio-inline {
-        margin-right: 0 !important;
-        display: inline-flex;
-        align-items: center;
-        gap: 6px; /* Controls space between the circle and the number */
-      }
-    ")),
-    tags$style(HTML("
       /* Expand input containers and labels to full width */
       .shiny-input-container {
         width: 100% !important;
@@ -113,6 +98,40 @@ survey_active_ui <- function(id) {
 survey_server <- function(id, shared_state) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
+    
+    # Helper: Sync Schema & Responses tabs to a connected Google Sheet
+    sync_schema_to_sheet <- function(sheet_id, schema_df) {
+      req(sheet_id, nrow(schema_df) > 0)
+      
+      # 1. Write Schema tab
+      googlesheets4::sheet_write(schema_df, ss = sheet_id, sheet = "Schema")
+      
+      # 2. Ensure Responses tab exists with matching headers (preserving existing rows if any)
+      current_tabs <- googlesheets4::sheet_names(sheet_id)
+      col_names <- c("Timestamp", schema_df$Variable)
+      
+      if (!"Responses" %in% current_tabs) {
+        dummy_df <- as.data.frame(matrix(ncol = length(col_names), nrow = 0), stringsAsFactors = FALSE)
+        colnames(dummy_df) <- col_names
+        googlesheets4::sheet_write(dummy_df, ss = sheet_id, sheet = "Responses")
+        shared_state$data <- dummy_df
+      } else {
+        existing_resp <- as.data.frame(
+          googlesheets4::read_sheet(sheet_id, sheet = "Responses", col_types = "c"),
+          stringsAsFactors = FALSE
+        )
+        # Add any newly created question columns if missing from Responses tab
+        missing_cols <- setdiff(col_names, colnames(existing_resp))
+        if (length(missing_cols) > 0) {
+          for (mc in missing_cols) {
+            existing_resp[[mc]] <- if (nrow(existing_resp) == 0) character(0) else NA_character_
+          }
+          existing_resp <- existing_resp[, col_names, drop = FALSE]
+          googlesheets4::sheet_write(existing_resp, ss = sheet_id, sheet = "Responses")
+        }
+        shared_state$data <- existing_resp
+      }
+    }
     
     # Safely generate the respondent link
     survey_link <- reactive({
@@ -167,7 +186,7 @@ survey_server <- function(id, shared_state) {
       cat(sprintf("Connected Sheet: %s\n", if (is.null(shared_state$sheet_id)) "Not Connected" else shared_state$sheet_id))
     })
     
-    # Add question to schema
+    # Add question to schema (works before OR after connecting an empty sheet)
     observeEvent(input$add_q, {
       req(input$var_name, input$q_prompt)
       
@@ -186,7 +205,7 @@ survey_server <- function(id, shared_state) {
         opts <- toupper(trimws(input$q_options))
       }
       
-      # Ensure existing schema has Subtitle column before rbind (if initialized elsewhere)
+      # Ensure existing schema has Subtitle column before rbind
       if (nrow(shared_state$schema) > 0 && !"Subtitle" %in% colnames(shared_state$schema)) {
         shared_state$schema$Subtitle <- ""
       }
@@ -202,10 +221,13 @@ survey_server <- function(id, shared_state) {
       
       shared_state$schema <- rbind(shared_state$schema, new_q)
       
+      # If a Google Sheet is already connected, immediately sync Schema + Responses headers
       if (!is.null(shared_state$sheet_id)) {
         tryCatch({
-          googlesheets4::sheet_write(shared_state$schema, ss = shared_state$sheet_id, sheet = "Schema")
-        }, error = function(e) NULL)
+          sync_schema_to_sheet(shared_state$sheet_id, shared_state$schema)
+        }, error = function(e) {
+          showNotification(paste("Sheet sync warning:", e$message), type = "warning")
+        })
       }
       
       updateTextInput(session, "var_name", value = "")
@@ -222,7 +244,7 @@ survey_server <- function(id, shared_state) {
       datatable(shared_state$schema, options = list(dom = 't', pageLength = 10, scrollX = TRUE)) 
     })
     
-    # Connect Google Sheet with safe re-connection logic
+    # Connect Google Sheet: handles existing schemas, empty schemas, AND blank sheets
     observeEvent(input$connect_btn, {
       req(input$user_sheet_url)
       
@@ -232,47 +254,63 @@ survey_server <- function(id, shared_state) {
         sheet_id <- googlesheets4::as_sheets_id(input$user_sheet_url)
         shared_state$sheet_id <- sheet_id
         
-        # Check if the Google Sheet already has your survey tabs
         sheet_names <- googlesheets4::sheet_names(sheet_id)
+        schema_tab <- if ("Schema" %in% sheet_names) "Schema" else sheet_names[1]
         
-        if ("Schema" %in% sheet_names && "Responses" %in% sheet_names) {
-          # SCENARIO A: Reconnecting to an existing survey
-          loaded_schema <- as.data.frame(
-            googlesheets4::read_sheet(sheet_id, sheet = "Schema", col_types = "c"),
-            stringsAsFactors = FALSE
-          )
-          # Backward compatibility if sheet was created before Subtitle was added
-          if (!"Subtitle" %in% colnames(loaded_schema)) {
-            loaded_schema$Subtitle <- ""
-          }
+        # Read candidate schema tab safely (col_types = "c" avoids errors on 0-row sheets)
+        loaded_schema <- as.data.frame(
+          googlesheets4::read_sheet(sheet_id, sheet = schema_tab, col_types = "c"),
+          stringsAsFactors = FALSE
+        )
+        
+        has_existing_schema <- (
+          nrow(loaded_schema) > 0 &&
+          all(c("Variable", "Prompt", "Type") %in% colnames(loaded_schema))
+        )
+        
+        if (has_existing_schema) {
+          # SCENARIO A: Existing spreadsheet already has a defined schema
+          if (!"Subtitle" %in% colnames(loaded_schema)) loaded_schema$Subtitle <- ""
+          if (!"Options" %in% colnames(loaded_schema)) loaded_schema$Options <- ""
+          loaded_schema <- loaded_schema[, c("Variable", "Prompt", "Subtitle", "Type", "Options"), drop = FALSE]
           shared_state$schema <- loaded_schema
           
-          shared_state$data <- as.data.frame(
-            googlesheets4::read_sheet(sheet_id, sheet = "Responses")
-          )
-          showNotification("Successfully reconnected and loaded your existing survey data!", type = "message")
-          
-        } else {
-          # SCENARIO B: Initializing a brand-new survey
-          if (nrow(shared_state$schema) == 0) {
-            showNotification("Add questions in the builder before initializing a new Google Sheet!", type = "warning")
-            return()
+          # Load existing Responses tab, or create an empty one with matching headers if missing
+          if ("Responses" %in% sheet_names) {
+            shared_state$data <- as.data.frame(
+              googlesheets4::read_sheet(sheet_id, sheet = "Responses", col_types = "c"),
+              stringsAsFactors = FALSE
+            )
+          } else {
+            col_names <- c("Timestamp", shared_state$schema$Variable)
+            dummy_df <- as.data.frame(matrix(ncol = length(col_names), nrow = 0), stringsAsFactors = FALSE)
+            colnames(dummy_df) <- col_names
+            googlesheets4::sheet_write(dummy_df, ss = sheet_id, sheet = "Responses")
+            shared_state$data <- dummy_df
           }
           
-          # Write schema
-          googlesheets4::sheet_write(shared_state$schema, ss = sheet_id, sheet = "Schema")
+          showNotification(
+            sprintf("Connected! Loaded %d questions and %d responses.", nrow(shared_state$schema), nrow(shared_state$data)),
+            type = "message"
+          )
           
-          # Prepare empty responses tab with headers
-          col_names <- c("Timestamp", shared_state$schema$Variable)
-          dummy_df <- data.frame(matrix(ncol = length(col_names), nrow = 0))
-          colnames(dummy_df) <- col_names
-          googlesheets4::sheet_write(dummy_df, ss = sheet_id, sheet = "Responses")
+        } else if (nrow(shared_state$schema) > 0) {
+          # SCENARIO B: Sheet is empty, and user ALREADY built questions in Step 2 -> push them now
+          sync_schema_to_sheet(sheet_id, shared_state$schema)
+          showNotification("Empty Google Sheet initialized with your builder questions!", type = "message")
           
-          shared_state$data <- as.data.frame(googlesheets4::read_sheet(sheet_id, sheet = "Responses"))
-          showNotification("New Google Sheet initialized successfully!", type = "message")
+        } else {
+          # SCENARIO C: Sheet is empty AND builder has 0 questions -> keep sheet linked so user can add questions
+          shared_state$data <- data.frame()
+          showNotification(
+            "Empty Google Sheet connected! Now add questions in Step 2—they will save automatically to this sheet.",
+            type = "message",
+            duration = 8
+          )
         }
         
       }, error = function(e) {
+        shared_state$sheet_id <- NULL
         showNotification(paste("Connection Error:", e$message), type = "error")
       }, finally = {
         removeNotification(id_notif)
@@ -283,9 +321,17 @@ survey_server <- function(id, shared_state) {
     observeEvent(input$sync_data_btn, {
       req(shared_state$sheet_id)
       tryCatch({
-        df <- as.data.frame(googlesheets4::read_sheet(shared_state$sheet_id, sheet = "Responses"))
-        shared_state$data <- df
-        showNotification(paste("Synced", nrow(df), "rows from Google Sheet."), type = "message")
+        sheet_names <- googlesheets4::sheet_names(shared_state$sheet_id)
+        if ("Responses" %in% sheet_names) {
+          df <- as.data.frame(
+            googlesheets4::read_sheet(shared_state$sheet_id, sheet = "Responses", col_types = "c"),
+            stringsAsFactors = FALSE
+          )
+          shared_state$data <- df
+          showNotification(paste("Synced", nrow(df), "rows from Google Sheet."), type = "message")
+        } else {
+          showNotification("No 'Responses' tab found yet. Add at least one question first.", type = "warning")
+        }
       }, error = function(e) {
         showNotification(paste("Sync failed:", e$message), type = "error")
       })
@@ -298,7 +344,7 @@ survey_server <- function(id, shared_state) {
       if (is.null(schema_df) || nrow(schema_df) == 0) {
         return(tags$div(
           class = "alert alert-warning",
-          "No survey questions found. If you are a respondent, ensure your link contains the full survey ID (?sid=...)."
+          "No survey questions found. Add questions in Step 2 or ensure your survey link contains the full survey ID (?sid=...)."
         ))
       }
       

@@ -90,6 +90,7 @@ server <- function(input, output, session) {
   )
 
   # Helper to load schema and existing responses (even if 0 rows) from a Google Sheet
+  # Helper to load schema and existing responses (handles completely blank sheets too)
   load_sheet_into_session <- function(sid) {
     sid <- trimws(sid)
     session_state$sheet_id <- sid
@@ -97,7 +98,7 @@ server <- function(input, output, session) {
     tryCatch({
       sheet_names <- googlesheets4::sheet_names(sid)
       
-      # 1. Load Schema tab (or first tab if "Schema" isn't named explicitly)
+      # 1. Check Schema tab (or first tab)
       schema_tab <- if ("Schema" %in% sheet_names) "Schema" else sheet_names[1]
       schema_remote <- as.data.frame(
         googlesheets4::read_sheet(sid, sheet = schema_tab, col_types = "c"),
@@ -105,16 +106,19 @@ server <- function(input, output, session) {
       )
       
       if (nrow(schema_remote) > 0 && "Variable" %in% colnames(schema_remote)) {
+        # Existing schema found -> load into builder & active survey
         session_state$schema <- schema_remote
+        showNotification("Loaded existing survey schema from Google Sheet.", type = "message")
       } else {
+        # Sheet is completely empty -> keep sheet_id linked so user can build & push new questions
         showNotification(
-          paste0("Connected to sheet, but tab '", schema_tab, "' has no schema rows (Variable, Prompt, Type, Options)."),
-          type = "warning",
-          duration = 10
+          "Connected to empty Google Sheet. Add questions in the Survey Builder and save to initialize it.",
+          type = "message",
+          duration = 8
         )
       }
       
-      # 2. Load Responses tab (handles 0 response rows cleanly without crashing)
+      # 2. Load Responses tab if present (safely handles 0 response rows)
       resp_tab <- if ("Responses" %in% sheet_names) {
         "Responses"
       } else if (length(sheet_names) >= 2) {
