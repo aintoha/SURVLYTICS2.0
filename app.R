@@ -23,14 +23,25 @@ if (!rmarkdown::pandoc_available()) {
   }
 }
 
-# 1. Authenticate with Google Sheets using the JSON key
+# 1. Authenticate with Google Sheets & Drive
 JSON_KEY_FILE <- "credentials.json"
+google_json_env <- Sys.getenv("GOOGLE_JSON_KEY")
 
-if (file.exists(JSON_KEY_FILE)) {
+if (nchar(google_json_env) > 0) {
+  # Production (Posit Connect Cloud): write env var string to a temporary file
+  temp_json <- tempfile(fileext = ".json")
+  writeLines(google_json_env, temp_json)
+  
+  googlesheets4::gs4_auth(path = temp_json)
+  googledrive::drive_auth(path = temp_json)
+  
+} else if (file.exists(JSON_KEY_FILE)) {
+  # Local development fallback
   googlesheets4::gs4_auth(path = JSON_KEY_FILE)
   googledrive::drive_auth(path = JSON_KEY_FILE)
+  
 } else {
-  warning("credentials.json not found! Google Sheets writing will fail.")
+  stop("Google credentials not found! Set GOOGLE_JSON_KEY env var or provide credentials.json.")
 }
 
 # 2. Source modules
