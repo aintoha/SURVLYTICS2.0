@@ -28,36 +28,20 @@ JSON_KEY_FILE <- "credentials.json"
 google_json_env <- Sys.getenv("GOOGLE_JSON_KEY")
 
 if (nchar(google_json_env) > 0) {
-  # Production (Posit Connect Cloud): write env var string to a temporary file
   temp_json <- tempfile(fileext = ".json")
   writeLines(google_json_env, temp_json)
-  
   googlesheets4::gs4_auth(path = temp_json)
   googledrive::drive_auth(path = temp_json)
-  
 } else if (file.exists(JSON_KEY_FILE)) {
-  # Local development fallback
   googlesheets4::gs4_auth(path = JSON_KEY_FILE)
   googledrive::drive_auth(path = JSON_KEY_FILE)
-  
 } else {
   stop("Google credentials not found! Set GOOGLE_JSON_KEY env var or provide credentials.json.")
 }
 
-SHEET_ID <- "https://docs.google.com/spreadsheets/d/YOUR_SPREADSHEET_ID/edit"
+# Default pre-existing Google Sheet ID (replace with your actual Sheet ID or full URL)
+DEFAULT_SHEET_ID <- "YOUR_ACTUAL_SPREADSHEET_ID"
 
-read_survey_sheet <- function(sheet_id) {
-  # Reads Row 1 as column names; col_types = "c" prevents type-guessing errors on empty sheets
-  df <- googlesheets4::read_sheet(
-    ss = sheet_id,
-    col_types = "c"
-  )
-  return(df)
-}
-
-# Load initial 0-row dataframe with schema headers intact
-survey_schema_df <- read_survey_sheet(SHEET_ID)
-schema_columns <- names(survey_schema_df)
 # 2. Source modules
 source("R/survey_module.R")
 source("R/analytics/01_summary_meta_module.R")
@@ -91,7 +75,7 @@ ui <- page_navbar(
 
 server <- function(input, output, session) {
 
-  # Session-isolated state: Each builder gets their own private memory
+  # Session-isolated state
   session_state <- reactiveValues(
     schema = data.frame(
       Variable = character(), 
@@ -105,46 +89,78 @@ server <- function(input, output, session) {
     final_models = list()
   )
 
-  # Check URL query params on page load
+  # Helper to load schema and existing responses (even if 0 rows) from a Google Sheet
+  load_sheet_into_session <- function(sid) {
+    sid <- trimws(sid)
+    session_state$sheet_id <- sid
+    
+    tryCatch({
+      sheet_names <- googlesheets4::sheet_names(sid)
+      
+      # 1. Load Schema tab (or first tab if "Schema" isn't named explicitly)
+      schema_tab <- if ("Schema" %in% sheet_names) "Schema" else sheet_names[1]
+      schema_remote <- as.data.frame(
+        googlesheets4::read_sheet(sid, sheet = schema_tab, col_types = "c"),
+        stringsAsFactors = FALSE
+      )
+      
+      if (nrow(schema_remote) > 0 && "Variable" %in% colnames(schema_remote)) {
+        session_state$schema <- schema_remote
+      } else {
+        showNotification(
+          paste0("Connected to sheet, but tab '", schema_tab, "' has no schema rows (Variable, Prompt, Type, Options)."),
+          type = "warning",
+          duration = 10
+        )
+      }
+      
+      # 2. Load Responses tab (handles 0 response rows cleanly without crashing)
+      resp_tab <- if ("Responses" %in% sheet_names) {
+        "Responses"
+      } else if (length(sheet_names) >= 2) {
+        sheet_names[2]
+      } else {
+        NULL
+      }
+      
+      if (!is.null(resp_tab)) {
+        resp_remote <- as.data.frame(
+          googlesheets4::read_sheet(sid, sheet = resp_tab, col_types = "c"),
+          stringsAsFactors = FALSE
+        )
+        session_state$data <- resp_remote
+      }
+      
+    }, error = function(e) {
+      showNotification(
+        paste("Google Sheet Read Error:", e$message),
+        type = "error",
+        duration = 15
+      )
+    })
+  }
+
+  # Load default sheet on startup OR switch to respondent mode if ?mode=survey is in URL
   observe({
     query <- parseQueryString(session$clientData$url_search)
+    
+    # Use ?sid=... from URL if provided, otherwise fall back to DEFAULT_SHEET_ID
+    target_sid <- if (!is.null(query$sid) && nzchar(trimws(query$sid))) {
+      query$sid
+    } else if (nzchar(DEFAULT_SHEET_ID) && DEFAULT_SHEET_ID != "YOUR_ACTUAL_SPREADSHEET_ID") {
+      DEFAULT_SHEET_ID
+    } else {
+      NULL
+    }
+    
+    if (!is.null(target_sid)) {
+      load_sheet_into_session(target_sid)
+    }
     
     if (!is.null(query$mode) && query$mode == "survey") {
       nav_select(id = "main_nav", selected = "2. Active Survey")
       nav_hide(id = "main_nav", target = "1. Survey Builder")
       nav_hide(id = "main_nav", target = "3. Analytics Engine")
-      
-      sid <- query$sid
-      if (!is.null(sid) && nzchar(trimws(sid))) {
-        sid <- trimws(sid)
-        session_state$sheet_id <- sid
-        
-        tryCatch({
-          sheet_names <- googlesheets4::sheet_names(sid)
-          target_tab <- if ("Schema" %in% sheet_names) "Schema" else sheet_names[1]
-          
-          schema_remote <- as.data.frame(
-            googlesheets4::read_sheet(sid, sheet = target_tab, col_types = "c"),
-            stringsAsFactors = FALSE
-          )
-          
-          if (nrow(schema_remote) > 0 && "Variable" %in% colnames(schema_remote)) {
-            session_state$schema <- schema_remote
-          } else {
-            showNotification(
-              paste0("Found tab '", target_tab, "', but it has no question rows defined."),
-              type = "warning",
-              duration = 10
-            )
-          }
-        }, error = function(e) {
-          showNotification(
-            paste("Google Sheet Read Error:", e$message),
-            type = "error",
-            duration = 15
-          )
-        })
-      }
     }
   })
   
