@@ -44,6 +44,8 @@ if (nchar(google_json_env) > 0) {
   stop("Google credentials not found! Set GOOGLE_JSON_KEY env var or provide credentials.json.")
 }
 
+SHEET_ID <- "https://docs.google.com/spreadsheets/d/YOUR_SPREADSHEET_ID/edit"
+
 # 2. Source modules
 source("R/survey_module.R")
 source("R/analytics/01_summary_meta_module.R")
