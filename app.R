@@ -43,6 +43,21 @@ if (nchar(google_json_env) > 0) {
 } else {
   stop("Google credentials not found! Set GOOGLE_JSON_KEY env var or provide credentials.json.")
 }
+
+SHEET_ID <- "https://docs.google.com/spreadsheets/d/YOUR_SPREADSHEET_ID/edit"
+
+read_survey_sheet <- function(sheet_id) {
+  # Reads Row 1 as column names; col_types = "c" prevents type-guessing errors on empty sheets
+  df <- googlesheets4::read_sheet(
+    ss = sheet_id,
+    col_types = "c"
+  )
+  return(df)
+}
+
+# Load initial 0-row dataframe with schema headers intact
+survey_schema_df <- read_survey_sheet(SHEET_ID)
+schema_columns <- names(survey_schema_df)
 # 2. Source modules
 source("R/survey_module.R")
 source("R/analytics/01_summary_meta_module.R")
